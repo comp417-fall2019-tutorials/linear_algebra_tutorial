@@ -3,113 +3,61 @@
 import cv2
 import math
 import os
-
 import numpy as np
 import rospy
-from gazebo_msgs.msg import ModelState
-from gazebo_msgs.srv import SetModelState
-from geometry_msgs.msg import Point, Quaternion
-from geometry_msgs.msg import Twist, Vector3
-from nav_msgs.msg import MapMetaData
-from nav_msgs.msg import OccupancyGrid
-from nav_msgs.msg import Odometry
-from sensor_msgs.msg import PointCloud
+from sensor_msgs.msg import Image
 from geometry_msgs.msg import Pose
 from tf.transformations import euler_from_quaternion, quaternion_from_euler
-from visualization_msgs.msg import Marker
+from nav_msgs.msg import Odometry
+from cv_bridge import CvBridge
+import numpy as np
 
-GAZEBO_PLANE_SIZE = (30.0, 30.0)
+K = np.array([[119.17577090035485, 0.0, 100.5], [0.0, 119.17577090035485, 100.5], [0.0, 0.0, 1.0]])
+K_inv = np.linalg.inv(K)
 
 
 class CameraView:
+    GAZEBO_PLANE_SIZE = (30.0, 30.0)
 
-    def __init__(self, end_on_collision, throttle, control_hz,
-                 pid_p, waypoint_dist_threshold, stop_to_turn_threshold,
-                 bounding_box):
-        self.end_on_collision = end_on_collision
-        self.throttle = throttle
-        self.control_hz = control_hz
-        self.pid_p = pid_p
-        self.stop_to_turn_threshold = stop_to_turn_threshold
-        self.waypoint_dist_threshold = waypoint_dist_threshold
-        self.bounding_box = bounding_box
-        self.map_image = self.bounding_box.map_image
-        self.waypoint_itr = 0
-        self.is_navigating = False
-
-        self.robot_command_pub = rospy.Publisher('/cmd_vel', Twist, queue_size=1)
-        self.waypoints_publisher = rospy.Publisher('/waypoint_path', Marker, queue_size=1)
-        self.collision_publisher = rospy.Publisher('/collisions', PointCloud, queue_size=1)
-        self.map_pub = rospy.Publisher('/map', OccupancyGrid, queue_size=1)
-
-        self.odom_subscriber = rospy.Subscriber('/odom', Odometry, self.on_odom, queue_size=1)
-        self.set_state = rospy.ServiceProxy('/gazebo/set_model_state', SetModelState)
-        rospy.Subscriber('/waypoints_command', PointCloud, self.on_waypoints_received)
+    def __init__(self, reef_plane_image):
+        self.odom_subscriber = rospy.Subscriber('/odom', Odometry, self.on_odom)
+        self.image_true_subscriber = rospy.Subscriber('/camera/image_true', Image, self.on_image_true)
+        self.image_generated_pub = rospy.Publisher('/camera/generated', Image, queue_size=1)
+        self.image_difference_pub = rospy.Publisher('/camera/difference', Image, queue_size=1)
+        self.reef_plane_image = reef_plane_image
+        self.cv_bridge = CvBridge()
         self.pose = (0, 0, 0)
 
-        while self.map_pub.get_num_connections() < 1:
-            rospy.loginfo("Waiting for RVIZ connection to display map")
-            rospy.sleep(0.5)
-        rospy.loginfo("Waypoints follower node ready")
-        self.publish_occupancy_grid()
+    def get_seabed_to_duck_camera_transform(self, x_duck, y_duck, theta_duck):
 
-    def publish_engine_command(self, throttle, steering):
-        robot_command = Twist()
-        robot_command.linear.x = throttle
-        robot_command.angular.z = steering
-        self.robot_command_pub.publish(robot_command)
+        CAMERA_X_OFFSET = 0.2
+        SEABED_Z_DEPTH = 2
+        half_plane_size = self.GAZEBO_PLANE_SIZE[0]/2
 
-    def waypoint_reached(self, waypoint, x, y):
-        return np.linalg.norm((waypoint[0]-x, waypoint[1]-y)) < self.waypoint_dist_threshold
-
-    def step(self, waypoints):
-
-        if self.waypoint_itr >= len(waypoints):
-            return True
-
-        agent_x, agent_y, agent_angle = self.pose
-        target_waypoint = waypoints[self.waypoint_itr]
-
-        if self.waypoint_reached(target_waypoint, agent_x, agent_y):
-            if self.waypoint_itr < len(waypoints)-1:
-                self.waypoint_itr += 1
-            else:
-                rospy.loginfo("Navigation complete")
-                self.publish_engine_command(0.0, 0.0)
-                return True
-
-        target_x = waypoints[self.waypoint_itr][0]
-        target_y = waypoints[self.waypoint_itr][1]
-        dx = target_x - agent_x
-        dy = target_y - agent_y
-
-        target_angle = math.atan2(dy, dx)
-
-        error_angle = target_angle - agent_angle
-        if error_angle > math.pi:
-            error_angle = error_angle - 2 * math.pi
-        if error_angle < -math.pi:
-            error_angle = error_angle + 2 * math.pi
-
-        # If error in angle too big: stop, turn then go
-        applied_throttle = 0.0 if abs(error_angle) > self.stop_to_turn_threshold else self.throttle
-        # rospy.loginfo("throttle=%.3f | target_angle=%.3f | agent_angle=%.3f | error=%.3f | dx=%.3f | dy=%.3f"
-        #               % (applied_throttle, target_angle, agent_angle, error_angle, dx, dy))
-        steer = self.pid_p * error_angle
-        self.publish_engine_command(applied_throttle, steer)
-        return False
-
-    def publish_path_status(self, waypoints, collisions):
-
-        marker_msg = create_marker_message(Marker.LINE_STRIP, 0)
-        marker_msg.points = [Point(p[0], p[1], 0) for p in waypoints]
-        self.waypoints_publisher.publish(marker_msg)
-
-        collision_msg = PointCloud()
-        collision_msg.header.stamp = rospy.Time.now()
-        collision_msg.header.frame_id = '/odom'
-        collision_msg.points = [Point(p[0], p[1], 0) for p in collisions]
-        self.collision_publisher.publish(collision_msg)
+        # TODO: Complete matrix transformations
+        # -----------------------------------------------
+        T_camera_offset = np.array([
+            [1, 0, 0, 0],
+            [0, 1, 0, 0],
+            [0, 0, 1, 0],
+            [0, 0, 0, 1],
+        ])
+        # Can use np.cos(rad), np.sin(rad)
+        R_duck_rot = np.array([
+            [1, 0, 0, 0],
+            [0, 1, 0, 0],
+            [0, 0, 1, 0],
+            [0, 0, 0, 1],
+        ])
+        T_seabed_to_duck = np.array([
+            [1, 0, 0, 0],
+            [0, 1, 0, 0],
+            [0, 0, 1, 0],
+            [0, 0, 0, 1],
+        ])
+        # END TODO
+        # -----------------------------------------------
+        return np.matmul(T_seabed_to_duck, np.matmul(R_duck_rot, T_camera_offset))
 
     def on_odom(self, odom):
         pos = odom.pose.pose.position
@@ -117,110 +65,65 @@ class CameraView:
         _, _, yaw = euler_from_quaternion([orientation_q.x, orientation_q.y, orientation_q.z, orientation_q.w])
         self.pose = pos.x, pos.y, yaw
 
-    def publish_occupancy_grid(self):
-        origin = Pose()
-        origin.position.x = -GAZEBO_PLANE_SIZE[0]/2.0
-        origin.position.y = -GAZEBO_PLANE_SIZE[1]/2.0
+    def get_sample_points(self, img_true):
+        n_rows = img_true.shape[1]
+        n_cols = img_true.shape[0]
+        sample_points = np.meshgrid(np.arange(0, n_rows), np.arange(0, n_cols))
+        samples_x = sample_points[0].flatten()
+        samples_y = sample_points[1].flatten()
+        sample_points = np.transpose(np.concatenate((np.expand_dims(samples_x, 1), np.expand_dims(samples_y, 1)), axis=1))
+        return np.concatenate((sample_points, np.expand_dims(np.ones(sample_points.shape[1]), 0)), axis=0)
 
-        data = [0 if self.map_image[i][j] > 0 else 100 for i
-                in range(self.map_image.shape[0]-1, -1, -1) for j in range(self.map_image.shape[1])]
-        msg = OccupancyGrid(
-            info=MapMetaData(
-                width=self.map_image.shape[1],
-                height=self.map_image.shape[0],
-                resolution=GAZEBO_PLANE_SIZE[0]/self.map_image.shape[0],
-                origin=origin
-            ),
-            data=data
-        )
-        msg.header.frame_id = 'odom'
-        self.map_pub.publish(msg)
+    def on_image_true(self, img_input):
+        F = self.get_seabed_to_duck_camera_transform(self.pose[0], self.pose[1], self.pose[2])
+        img_true = self.cv_bridge.imgmsg_to_cv2(img_input, "bgr8")
+        img_generated = np.zeros_like(img_true)
 
-    def set_model_pose(self, x, y, yaw=0.0):
-        state_msg = ModelState()
-        state_msg.model_name = 'robot_model'
-        state_msg.pose.position = Point(x, y, 0.1)
-        state_msg.pose.orientation = Quaternion(*quaternion_from_euler(0.0, 0.0, yaw))
-        try:
-            resp = self.set_state(state_msg)
-        except rospy.ServiceException, e:
-            rospy.logwarn("Service call failed: %s" % e)
+        sample_points = self.get_sample_points(img_true)
+        cam_coords = np.matmul(K_inv, sample_points)
 
-    def on_waypoints_received(self, path):
+        # Add back in z depth
+        cam_coords = cam_coords*2.0
+        cam_coords[2, :] = cam_coords[2, :] * -1
+        cam_coords = np.concatenate((cam_coords, np.expand_dims(np.ones(cam_coords.shape[1]), 0)), axis=0)
 
-        if len(path.points) < 2:
-            rospy.logwarn("Ignoring waypoints command. "
-                          "Must have atleast 2 waypoints to navigate between but received %d." % len(path.points))
-            return
+        # Pixel to gazebo scale matrix
+        S = np.eye(4)
+        S[0,0] = self.reef_plane_image.shape[1]/self.GAZEBO_PLANE_SIZE[1]
+        S[1,1] = self.reef_plane_image.shape[0]/self.GAZEBO_PLANE_SIZE[0]
 
-        if self.is_navigating:
-            rospy.logwarn("Already executing path. New path ignored.")
-            return
+        # Camera frame rotation matrix
+        R_camera_frame = np.array([
+            [np.cos(-np.pi / 2), -np.sin(-np.pi / 2), 0, 0],
+            [np.sin(-np.pi / 2), np.cos(-np.pi / 2), 0, 0],
+            [0, 0, 1, 0],
+            [0, 0, 0, 1],
+        ])
 
-        rospy.loginfo("Received new waypoints path of length %d." % len(path.points))
-        waypoints = to_gazebo_coordinates(path.points, map_image.shape, GAZEBO_PLANE_SIZE)
+        reef_plane_coords = np.matmul(S, (np.matmul(F, np.matmul(R_camera_frame, cam_coords))))
 
-        self.is_navigating = True
-        try:
-            self.navigate(waypoints)
-        finally:
-            self.is_navigating = False
-            self.publish_engine_command(0.0, 0.0)
+        for reef_plane_coord, img_coord in zip(np.transpose(reef_plane_coords), np.transpose(sample_points)):
+            r = self.reef_plane_image.shape[0]-int(reef_plane_coord[1])-1
+            c = int(reef_plane_coord[0])
+            reef_plane_px = self.reef_plane_image[r, c]
+            img_generated[img_generated.shape[0]-int(img_coord[1])-1, int(img_coord[0]), :] = reef_plane_px
 
-    def navigate(self, waypoints):
-        is_navgoal_reached = False
-
-        self.set_model_pose(waypoints[0][0], waypoints[0][1])
-        self.waypoint_itr = 1
-
-        collisions = []
-        rate = rospy.Rate(self.control_hz)
-
-        self.publish_occupancy_grid()
-        while not is_navgoal_reached:
-            self.publish_path_status(waypoints, collisions)
-            current_pose = self.pose
-            if self.bounding_box.is_collision(*current_pose):
-                collisions.append(current_pose)
-                rospy.loginfo("Collision detected at pose = (x=%.3f, y=%.3f, yaw=%.3f)" % current_pose)
-                if self.end_on_collision:
-                    self.publish_engine_command(0.0, 0.0)
-                    break
-
-            is_navgoal_reached = self.step(waypoints)
-            rate.sleep()
-
-
-def to_gazebo_coordinates(states_in, img_shape, world_shape):
-
-    gazebo_coords = np.array([[s.x * float(world_shape[0])/img_shape[1] - world_shape[0]/2.0,
-                               world_shape[1] / 2.0 - s.y * float(world_shape[1]) / img_shape[0]]
-                              for s in states_in])
-    return gazebo_coords
+        img_difference = np.zeros_like(img_true)
+        img_difference[:, :, :] = np.abs(img_true.astype(int) - img_generated.astype(int))
+        self.image_generated_pub.publish(self.cv_bridge.cv2_to_imgmsg(img_generated, "bgr8"))
+        self.image_difference_pub.publish(self.cv_bridge.cv2_to_imgmsg(img_difference, "bgr8"))
 
 
 if __name__ == '__main__':
 
-    rospy.init_node('follow_waypoints', anonymous=True)
-    rospy.loginfo("Follow waypoints node starting")
+    rospy.init_node('camera_view_node', anonymous=True)
+    rospy.loginfo("Camera View Node Starting")
 
     pkg_dir = os.popen('rospack find linear_algebra_tutorial').read().rstrip()
+    reef_plane_path = os.path.join(pkg_dir, 'materials', 'reef_plane.png')
+    reef_plane_image = cv2.imread(reef_plane_path)
 
-    map_file = rospy.get_param("~map_file", os.path.join(pkg_dir, 'materials', 'map.png'))
-    end_on_collision = rospy.get_param("~end_on_collision", False)
-    throttle = rospy.get_param("~throttle", 0.6)
-    update_hz = rospy.get_param("~update_hz", 60)
-    pid_p = rospy.get_param("~pid_p", 0.4)
-    waypoint_dist_threshold = rospy.get_param("~waypoint_dist_threshold", 0.1)
-    stop_to_turn_threshold = rospy.get_param("~stop_to_turn_threshold", np.pi/9)
-    bbox_x = rospy.get_param("~bbox_x", 0.205)
-    bbox_y = rospy.get_param("~bbox_y", 0.165)
-    map_image = cv2.imread(map_file, cv2.IMREAD_GRAYSCALE)
-
-    bounding_box = CarBoundingBox(bbox_x, bbox_y, map_image)
-    waypoint_follower = WaypointFollower(end_on_collision, throttle,
-                                         update_hz, pid_p, waypoint_dist_threshold,
-                                         stop_to_turn_threshold, bounding_box)
+    camera_view_worker = CameraView(reef_plane_image)
 
     while not rospy.is_shutdown():
         rospy.spin()
