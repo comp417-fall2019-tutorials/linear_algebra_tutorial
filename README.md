@@ -35,7 +35,7 @@ source ~/.bashrc
 
 ```shell script
 cd ~/catkin_ws/src
-git clone https://github.com/comp417-fall2019-tutorials/ros_tutorial.git
+git clone https://github.com/comp417-fall2019-tutorials/linear_algebra_tutorial.git
 ```
 
 - Build your catkin_ws folder. Navigate back to the catkin_ws folder and execute the `catkin_make` command 
