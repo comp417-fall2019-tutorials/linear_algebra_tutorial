@@ -26,7 +26,7 @@ mkdir -p catkin_ws/src
 
 - If this is the first time building the catkin workspace, `~/catkin_ws/devel/setup.bash` should be included in your `.bashrc`:   
 ```shell script
-echo "source ~catkin_ws/devel/setup.bash" >> ~/.bashrc
+echo "source ~/catkin_ws/devel/setup.bash" >> ~/.bashrc
 source ~/.bashrc
 ```
 
