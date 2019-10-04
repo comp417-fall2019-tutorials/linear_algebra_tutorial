@@ -87,7 +87,7 @@ python python/camera_view_node.py
 ``` 
 __OR__
 ```shell script
-roslaunch linear_algebera_tutorial camera_view_node.py
+roslaunch linear_algebra_tutorial camera_view.launch
 ```
 
 - Open **rqt_image_view** and compare your generated image using matrix transformations with the image generated from the true camera.
