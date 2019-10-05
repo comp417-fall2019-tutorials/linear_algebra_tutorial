@@ -1,7 +1,7 @@
 # Tutorial 3 - Linear Algebra Refresher
 
 ## Part 1 - Tutorial Slides
-- See the lecture slides under /documentation/linear_algebera_tutorial.pdf 
+- See the lecture slides under [documentation/LinearAlgebra_Tutorial.pdf](documentation/LinearAlgebra_Tutorial.pdf) 
 
 ## Part 2 - ROS Coordinate Transform Exercise
 RoboDuck is on its first deployment in the ocean. We have a map of the ocean seabed but RoboDuck lacks a camera to visualize how the seabed would appear at its current location. Your task is to complete the matrix transformations necessary for RoboDuck to extract an image cutout from the map that would correspond to its view of the seabed. We will compare this implementation against what a true camera generates.
